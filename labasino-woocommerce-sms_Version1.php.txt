@@ -1,0 +1,316 @@
+<?php
+/**
+ * Plugin Name: Labasino WooCommerce SMS
+ * Plugin URI: https://github.com/ghaffari00988/labasino-woocommerce-sms
+ * Description: افزونه کامل ارسال پیامک و ورود OTP برای ووکامرس با پشتیبانی از درگاه‌های ایرانی
+ * Version: 1.0.0
+ * Author: Labasino Team
+ * Author URI: https://labasino.com
+ * Text Domain: labasino-sms
+ * Domain Path: /languages
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ * WC requires at least: 6.0
+ * WC tested up to: 8.5
+ * License: GPL v3
+ * License URI: https://www.gnu.org/licenses/gpl-3.0.html
+ */
+
+// Exit if accessed directly
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Define plugin constants
+define('LABASINO_SMS_VERSION', '1.0.0');
+define('LABASINO_SMS_PLUGIN_DIR', plugin_dir_path(__FILE__));
+define('LABASINO_SMS_PLUGIN_URL', plugin_dir_url(__FILE__));
+define('LABASINO_SMS_PLUGIN_FILE', __FILE__);
+define('LABASINO_SMS_PLUGIN_BASENAME', plugin_basename(__FILE__));
+
+/**
+ * Main Plugin Class
+ */
+class Labasino_WooCommerce_SMS {
+    
+    /**
+     * Single instance
+     */
+    private static $instance = null;
+    
+    /**
+     * Get instance
+     */
+    public static function get_instance() {
+        if (null === self::$instance) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+    
+    /**
+     * Constructor
+     */
+    private function __construct() {
+        $this->check_requirements();
+        $this->load_dependencies();
+        $this->init_hooks();
+    }
+    
+    /**
+     * Check plugin requirements
+     */
+    private function check_requirements() {
+        // Check if WooCommerce is active
+        if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+            add_action('admin_notices', array($this, 'woocommerce_missing_notice'));
+            return false;
+        }
+        
+        return true;
+    }
+    
+    /**
+     * WooCommerce missing notice
+     */
+    public function woocommerce_missing_notice() {
+        ?>
+        <div class="notice notice-error">
+            <p><?php _e('افزونه Labasino SMS نیاز به فعال بودن افزونه WooCommerce دارد.', 'labasino-sms'); ?></p>
+        </div>
+        <?php
+    }
+    
+    /**
+     * Load plugin dependencies
+     */
+    private function load_dependencies() {
+        // Core
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/class-database.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/class-logger.php';
+        
+        // SMS Gateways
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/gateways/class-gateway-abstract.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/gateways/class-gateway-kavenegar.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/gateways/class-gateway-melipayamak.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/gateways/class-gateway-farazsms.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/gateways/class-gateway-smsir.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/gateways/class-gateway-ghasedak.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/class-gateway-manager.php';
+        
+        // OTP Authentication
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/otp/class-otp-manager.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/otp/class-otp-login.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/otp/class-otp-register.php';
+        
+        // Order Notifications
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/notifications/class-order-notifications.php';
+        
+        // Admin
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/admin/class-admin-settings.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/admin/class-admin-dashboard.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/admin/class-admin-logs.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/admin/class-admin-bulk-sms.php';
+        
+        // Frontend
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/frontend/class-login-form.php';
+        require_once LABASINO_SMS_PLUGIN_DIR . 'includes/frontend/class-account-settings.php';
+    }
+    
+    /**
+     * Initialize hooks
+     */
+    private function init_hooks() {
+        // Activation/Deactivation
+        register_activation_hook(__FILE__, array($this, 'activate'));
+        register_deactivation_hook(__FILE__, array($this, 'deactivate'));
+        
+        // Load text domain
+        add_action('plugins_loaded', array($this, 'load_textdomain'));
+        
+        // Initialize components
+        add_action('plugins_loaded', array($this, 'init_components'));
+        
+        // Enqueue scripts and styles
+        add_action('admin_enqueue_scripts', array($this, 'admin_enqueue_scripts'));
+        add_action('wp_enqueue_scripts', array($this, 'frontend_enqueue_scripts'));
+    }
+    
+    /**
+     * Plugin activation
+     */
+    public function activate() {
+        // Create database tables
+        Labasino_SMS_Database::create_tables();
+        
+        // Set default options
+        $this->set_default_options();
+        
+        // Flush rewrite rules
+        flush_rewrite_rules();
+    }
+    
+    /**
+     * Plugin deactivation
+     */
+    public function deactivate() {
+        // Flush rewrite rules
+        flush_rewrite_rules();
+    }
+    
+    /**
+     * Set default options
+     */
+    private function set_default_options() {
+        $defaults = array(
+            'labasino_sms_gateway' => 'kavenegar',
+            'labasino_sms_enable_otp' => 'yes',
+            'labasino_sms_otp_length' => 6,
+            'labasino_sms_otp_expiry' => 2,
+            'labasino_sms_otp_limit' => 3,
+            'labasino_sms_otp_limit_time' => 10,
+            'labasino_sms_primary_color' => '#e74c3c',
+            'labasino_sms_font_family' => 'IRANSans',
+            'labasino_sms_enable_order_notifications' => 'yes',
+            'labasino_sms_admin_mobile' => '',
+        );
+        
+        foreach ($defaults as $key => $value) {
+            if (get_option($key) === false) {
+                add_option($key, $value);
+            }
+        }
+    }
+    
+    /**
+     * Load text domain
+     */
+    public function load_textdomain() {
+        load_plugin_textdomain('labasino-sms', false, dirname(LABASINO_SMS_PLUGIN_BASENAME) . '/languages');
+    }
+    
+    /**
+     * Initialize components
+     */
+    public function init_components() {
+        // Initialize Gateway Manager
+        Labasino_SMS_Gateway_Manager::get_instance();
+        
+        // Initialize OTP
+        if (get_option('labasino_sms_enable_otp') === 'yes') {
+            Labasino_SMS_OTP_Manager::get_instance();
+            Labasino_SMS_OTP_Login::get_instance();
+            Labasino_SMS_OTP_Register::get_instance();
+        }
+        
+        // Initialize Order Notifications
+        if (get_option('labasino_sms_enable_order_notifications') === 'yes') {
+            Labasino_SMS_Order_Notifications::get_instance();
+        }
+        
+        // Initialize Admin
+        if (is_admin()) {
+            Labasino_SMS_Admin_Settings::get_instance();
+            Labasino_SMS_Admin_Dashboard::get_instance();
+            Labasino_SMS_Admin_Logs::get_instance();
+            Labasino_SMS_Admin_Bulk_SMS::get_instance();
+        }
+        
+        // Initialize Frontend
+        if (!is_admin()) {
+            Labasino_SMS_Login_Form::get_instance();
+            Labasino_SMS_Account_Settings::get_instance();
+        }
+    }
+    
+    /**
+     * Enqueue admin scripts and styles
+     */
+    public function admin_enqueue_scripts($hook) {
+        // Only load on plugin pages
+        if (strpos($hook, 'labasino-sms') === false) {
+            return;
+        }
+        
+        // CSS
+        wp_enqueue_style('labasino-sms-admin', LABASINO_SMS_PLUGIN_URL . 'assets/css/admin.css', array(), LABASINO_SMS_VERSION);
+        
+        // JS
+        wp_enqueue_script('labasino-sms-admin', LABASINO_SMS_PLUGIN_URL . 'assets/js/admin.js', array('jquery'), LABASINO_SMS_VERSION, true);
+        
+        // Chart.js for dashboard
+        wp_enqueue_script('chart-js', 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js', array(), '4.4.0', true);
+        
+        // Localize script
+        wp_localize_script('labasino-sms-admin', 'labasinoSMS', array(
+            'ajax_url' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('labasino-sms-admin'),
+        ));
+    }
+    
+    /**
+     * Enqueue frontend scripts and styles
+     */
+    public function frontend_enqueue_scripts() {
+        // Bootstrap CSS (only if not already loaded)
+        if (!wp_style_is('bootstrap', 'enqueued')) {
+            wp_enqueue_style('bootstrap', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css', array(), '5.3.2');
+        }
+        
+        // Font
+        $font_family = get_option('labasino_sms_font_family', 'IRANSans');
+        if ($font_family === 'IRANSans') {
+            wp_enqueue_style('iran-sans', LABASINO_SMS_PLUGIN_URL . 'assets/fonts/iransans/iransans.css', array(), LABASINO_SMS_VERSION);
+        } elseif ($font_family === 'Vazir') {
+            wp_enqueue_style('vazir', 'https://cdn.jsdelivr.net/gh/rastikerdar/vazir-font@v30.1.0/dist/font-face.css', array(), '30.1.0');
+        }
+        
+        // Plugin CSS
+        wp_enqueue_style('labasino-sms-frontend', LABASINO_SMS_PLUGIN_URL . 'assets/css/frontend.css', array(), LABASINO_SMS_VERSION);
+        
+        // Bootstrap JS (only if not already loaded)
+        if (!wp_script_is('bootstrap', 'enqueued')) {
+            wp_enqueue_script('bootstrap', 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js', array(), '5.3.2', true);
+        }
+        
+        // Plugin JS
+        wp_enqueue_script('labasino-sms-frontend', LABASINO_SMS_PLUGIN_URL . 'assets/js/frontend.js', array('jquery'), LABASINO_SMS_VERSION, true);
+        
+        // Localize script
+        wp_localize_script('labasino-sms-frontend', 'labasinoSMS', array(
+            'ajax_url' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('labasino-sms-frontend'),
+            'primary_color' => get_option('labasino_sms_primary_color', '#e74c3c'),
+        ));
+        
+        // Inline CSS for customization
+        $this->add_inline_styles();
+    }
+    
+    /**
+     * Add inline styles for customization
+     */
+    private function add_inline_styles() {
+        $primary_color = get_option('labasino_sms_primary_color', '#e74c3c');
+        $font_family = get_option('labasino_sms_font_family', 'IRANSans');
+        
+        $custom_css = "
+            :root {
+                --labasino-primary-color: {$primary_color};
+                --labasino-font-family: {$font_family}, sans-serif;
+            }
+        ";
+        
+        wp_add_inline_style('labasino-sms-frontend', $custom_css);
+    }
+}
+
+/**
+ * Initialize plugin
+ */
+function labasino_sms_init() {
+    return Labasino_WooCommerce_SMS::get_instance();
+}
+
+// Start the plugin
+labasino_sms_init();
